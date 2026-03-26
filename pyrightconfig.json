@@ -1,0 +1,10 @@
+{
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Windows",
+  "venvPath": ".",
+  "extraPaths": [
+    "C:/Users/adity/AppData/Roaming/Python/Python313/site-packages",
+    "C:/Python313/Lib/site-packages"
+  ],
+  "typeCheckingMode": "off"
+}
