@@ -17,7 +17,7 @@ from telegram.ext import (  # type: ignore
 from telegram.constants import ParseMode  # type: ignore
 
 from src import session_store as ss  # type: ignore
-from src.analyzer import analyze_resume  # type: ignore
+from src.analyzer import analyze_resume, ask_followup  # type: ignore
 from src.file_handler import extract_text  # type: ignore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -38,8 +38,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 *Welcome to the Resume Analyzer Bot!*\n\n"
         "I'll help you evaluate your resume against a job description and give you a score out of 10 "
         "along with personalized improvement suggestions.\n\n"
-        "📋 *Step 1:* Please paste the *Job Description* below.\n\n"
-        "_Tip: Copy-paste the full JD text for best results._",
+        "📋 *Step 1:* Please send the *Job Description*.\n\n"
+        "You can either:\n"
+        "• Paste the full text here 📝\n"
+        "• Upload it as a *PDF* or *DOCX* file 📎",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -115,9 +117,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ Analysis in progress, please wait...")
 
     elif state == ss.DONE:
-        await update.message.reply_text(
-            "✅ Analysis complete! Send /reset to analyze another resume.",
-        )
+        if not text.strip():
+            return
+        
+        msg = await update.message.reply_text("⏳ Thinking...")
+        try:
+            answer = ask_followup(session.get("jd", ""), session.get("resume", ""), text)
+            await msg.edit_text(answer, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            await msg.edit_text(f"❌ Failed to get answer: {e}")
 
 
 # ─── Document Handler ─────────────────────────────────────────────────────────
@@ -127,9 +135,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = ss.get_session(user_key)
     state = session["state"]
 
-    if state != ss.AWAITING_RESUME:
+    if state not in (ss.AWAITING_JD, ss.AWAITING_RESUME):
         await update.message.reply_text(
-            "⚠️ Please start with /start and paste the Job Description first before sending your resume.",
+            "⚠️ Please send /start first to begin a new analysis.",
         )
         return
 
@@ -167,8 +175,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    ss.set_resume(user_key, resume_text)
-    await _run_analysis(update, user_key, session)
+    if state == ss.AWAITING_JD:
+        ss.set_jd(user_key, resume_text)
+        ss.set_state(user_key, ss.AWAITING_RESUME)
+        await update.message.reply_text(
+            "✅ *Job Description saved!*\n\n"
+            "📄 *Step 2:* Now send me your *Resume*.\n\n"
+            "You can either:\n"
+            "• Upload a *PDF* or *DOCX* file 📎\n"
+            "• Paste your resume text directly 📝",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:  # state == ss.AWAITING_RESUME
+        ss.set_resume(user_key, resume_text)
+        await _run_analysis(update, user_key, session)
 
 
 # ─── Core Analysis Runner ─────────────────────────────────────────────────────

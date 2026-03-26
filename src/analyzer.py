@@ -128,6 +128,32 @@ RESUME:
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("Type /reset to analyze another resume.")
+    lines.append("💬 *You can now ask follow-up questions* (e.g. \"How to improve my summary?\")")
+    lines.append("🔄 Type /reset to analyze a new resume.")
 
     return "\n".join(lines)
+
+
+def ask_followup(job_description: str, resume_text: str, question: str) -> str:
+    """
+    Handles follow-up questions after the initial analysis using stateless context.
+    """
+    prompt = f"""
+You are an expert HR analyst and resume coach. 
+The user has previously provided their resume and a job description. 
+They are now asking a follow-up question regarding how to improve their resume, interview tips, or specific details.
+
+JOB DESCRIPTION:
+{job_description}
+
+RESUME:
+{resume_text}
+
+USER'S QUESTION:
+{question}
+
+Answer the question directly, concisely, and professionally. Do not use JSON. Use simple markdown.
+"""
+    response = model.generate_content(prompt)
+    return response.text.strip()
+

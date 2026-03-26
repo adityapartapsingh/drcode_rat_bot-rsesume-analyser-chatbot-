@@ -13,7 +13,7 @@ from twilio.twiml.messaging_response import MessagingResponse  # type: ignore
 from twilio.rest import Client  # type: ignore
 
 from src import session_store as ss  # type: ignore
-from src.analyzer import analyze_resume  # type: ignore
+from src.analyzer import analyze_resume, ask_followup  # type: ignore
 from src.file_handler import extract_text  # type: ignore
 
 logger = logging.getLogger(__name__)
@@ -104,37 +104,13 @@ def whatsapp_webhook():
             "👋 Welcome to the Resume Analyzer Bot!\n\n"
             "I'll score your resume against a job description (out of 10) and "
             "give you personalized improvement tips.\n\n"
-            "📋 Step 1: Please send me the Job Description text."
+            "📋 Step 1: Please send me the Job Description (paste text OR upload a PDF/DOCX file)."
         )
         return str(resp)
 
-    # ── AWAITING_JD ────────────────────────────────────────────────────────────
-    if state == ss.IDLE:
-        resp.message("👋 Send 'Hi' or 'Start' to begin your resume analysis!")
-        return str(resp)
-
-    if state == ss.AWAITING_JD:
-        if len(body) < 50:
-            resp.message("⚠️ That seems too short. Please paste the full Job Description.")
-            return str(resp)
-        ss.set_jd(user_key, body)
-        ss.set_state(user_key, ss.AWAITING_RESUME)
-        resp.message(
-            "✅ Job Description saved!\n\n"
-            "📄 Step 2: Now send your Resume.\n\n"
-            "You can:\n"
-            "• Upload a PDF or DOCX file\n"
-            "• Paste your resume text directly"
-        )
-        return str(resp)
-
-    # ── AWAITING_RESUME ────────────────────────────────────────────────────────
-    if state == ss.AWAITING_RESUME:
-        if state == ss.ANALYZING:
-            resp.message("⏳ Still analyzing, please wait...")
-            return str(resp)
-
-        resume_text = None
+    # ── AWAITING_JD or AWAITING_RESUME ─────────────────────────────────────────
+    if state in (ss.AWAITING_JD, ss.AWAITING_RESUME):
+        extracted_text = None
         save_path = None
 
         # File upload
@@ -150,10 +126,10 @@ def whatsapp_webhook():
                 resp.message("❌ Unsupported file type. Please send a PDF, DOCX, or TXT file.")
                 return str(resp)
 
-            resp.message("⏳ Downloading your resume, please wait...")
+            resp.message("⏳ Downloading document, please wait...")
             try:
                 save_path = _download_twilio_media(media_url, ext)
-                resume_text = extract_text(save_path)
+                extracted_text = extract_text(save_path)
             except Exception as e:
                 resp.message(f"❌ Error reading file: {e}")
                 return str(resp)
@@ -162,41 +138,68 @@ def whatsapp_webhook():
                     os.remove(save_path)
 
         # Text paste
-        elif body and len(body) >= 100:
-            resume_text = body
+        elif body and len(body) >= 50:
+            extracted_text = body
 
         else:
+            msg_type = "Job Description" if state == ss.AWAITING_JD else "resume"
             resp.message(
-                "⚠️ That seems too short for a resume.\n\n"
+                f"⚠️ That seems too short for a {msg_type}.\n\n"
                 "Please paste more text OR upload a PDF/DOCX file."
             )
             return str(resp)
 
-        ss.set_resume(user_key, resume_text)
-        ss.set_state(user_key, ss.ANALYZING)
+        if not extracted_text or len(extracted_text) < 50:
+            resp.message("⚠️ The file or text is too short or empty. Please try again.")
+            return str(resp)
 
-        # Acknowledge synchronously; analysis happens and is sent via REST
-        resp.message("🔍 Analyzing your resume... I'll reply shortly (10-20 seconds).")
-
-        # Run analysis and send result (outside TwiML response, via REST API)
-        try:
-            result = _plain_text_analysis(session["jd"], resume_text)
-            ss.set_state(user_key, ss.DONE)
-            _send_whatsapp(from_number, result)
-            _send_whatsapp(from_number, "Send 'Reset' to analyze another resume.")
-        except Exception as e:
-            logger.error(f"WhatsApp analysis failed: {e}")
+        if state == ss.AWAITING_JD:
+            ss.set_jd(user_key, extracted_text)
             ss.set_state(user_key, ss.AWAITING_RESUME)
-            _send_whatsapp(from_number, f"❌ Analysis failed: {e}\n\nPlease try again.")
+            resp.message(
+                "✅ Job Description saved!\n\n"
+                "📄 Step 2: Now send your Resume.\n\n"
+                "You can:\n"
+                "• Upload a PDF or DOCX file\n"
+                "• Paste your resume text directly"
+            )
+            return str(resp)
 
-        return str(resp)
+        else:  # state == ss.AWAITING_RESUME
+            ss.set_resume(user_key, extracted_text)
+            ss.set_state(user_key, ss.ANALYZING)
+
+            # Acknowledge synchronously; analysis happens and is sent via REST
+            resp.message("🔍 Analyzing your resume... I'll reply shortly (10-20 seconds).")
+
+            # Run analysis and send result (outside TwiML response, via REST API)
+            try:
+                result = _plain_text_analysis(session["jd"], extracted_text)
+                ss.set_state(user_key, ss.DONE)
+                _send_whatsapp(from_number, result)
+                _send_whatsapp(from_number, "💬 You can now ask follow-up questions, or send 'Reset' to start over.")
+            except Exception as e:
+                logger.error(f"WhatsApp analysis failed: {e}")
+                ss.set_state(user_key, ss.AWAITING_RESUME)
+                _send_whatsapp(from_number, f"❌ Analysis failed: {e}\n\nPlease try again.")
+
+            return str(resp)
 
     if state == ss.ANALYZING:
         resp.message("⏳ Still analyzing, please wait...")
         return str(resp)
 
     if state == ss.DONE:
-        resp.message("✅ Analysis complete! Send 'Reset' to analyze another resume.")
+        if not body:
+            return str(resp)
+        resp.message("⏳ Thinking... I'll reply in a moment.")
+        try:
+            answer = ask_followup(session.get("jd", ""), session.get("resume", ""), body)
+            answer = answer.replace("*", "").replace("_", "").replace("`", "")
+            _send_whatsapp(from_number, answer)
+        except Exception as e:
+            logger.error(f"WhatsApp follow-up failed: {e}")
+            _send_whatsapp(from_number, f"❌ Failed to answer: {e}")
         return str(resp)
 
     resp.message("Something went wrong. Send 'Reset' to start over.")
