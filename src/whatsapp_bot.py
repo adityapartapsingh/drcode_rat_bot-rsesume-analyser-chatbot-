@@ -27,11 +27,39 @@ os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 def _send_whatsapp(to: str, body: str):
     """Send a WhatsApp message via Twilio REST API (for async / long messages)."""
     client = Client(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
-    client.messages.create(
-        from_=os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886"),
-        to=to,
-        body=body,
-    )
+    from_num = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+    
+    # Twilio limit is 1600 characters, but Unicode/emojis count as more bytes.
+    # 800 safely avoids hitting any encoded string limits.
+    max_length = 800  
+    
+    if len(body) <= max_length:
+        client.messages.create(from_=from_num, to=to, body=str(body))
+        return
+
+    # Split into chunks cleanly by newline
+    lines = body.split('\n')
+    current_chunk = ""
+    
+    for line in lines:
+        # If a single line is insanely long, force split it (edge case)
+        if len(line) > max_length:
+            if current_chunk:
+                client.messages.create(from_=from_num, to=to, body=str(current_chunk).strip())
+                current_chunk = ""
+            for i in range(0, len(line), max_length):
+                client.messages.create(from_=from_num, to=to, body=str(line)[i:i+max_length])  # type: ignore
+            continue
+            
+        if len(current_chunk) + len(line) + 1 > max_length:
+            if current_chunk:
+                client.messages.create(from_=from_num, to=to, body=str(current_chunk).strip())
+            current_chunk = line + "\n"
+        else:
+            current_chunk = str(current_chunk) + line + "\n"
+            
+    if str(current_chunk).strip():
+        client.messages.create(from_=from_num, to=to, body=str(current_chunk).strip())
 
 
 def _plain_text_analysis(jd: str, resume: str) -> str:
